@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add authenticated juno-scan access, address-filtered note queries, typed address balances, and scanner readiness/cache health fields.
+- Add authenticated juno-scan access, birthday-aware wallet registration, typed historical backfill progress, bounded resume calls, address-filtered note queries, typed address balances, and scanner readiness/cache health fields.
 - Add typed verbose `junocashd` transaction lookup with optional raw hex and mined/mempool helpers.
 - Preserve structured HTTP, API, and JSON-RPC error metadata for gateway retry and status mapping.
 

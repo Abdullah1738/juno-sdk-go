@@ -36,7 +36,7 @@ func TestClient_UpsertWalletAndList(t *testing.T) {
 		case http.MethodGet:
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"wallets": []map[string]any{
-					{"wallet_id": "hot", "created_at": time.Unix(1, 0).UTC()},
+					{"wallet_id": "hot", "birthday_height": 42, "created_at": time.Unix(1, 0).UTC()},
 				},
 			})
 		default:
@@ -69,8 +69,154 @@ func TestClient_UpsertWalletAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListWallets: %v", err)
 	}
-	if len(wallets) != 1 || wallets[0].WalletID != "hot" {
+	if len(wallets) != 1 || wallets[0].WalletID != "hot" || wallets[0].BirthdayHeight != 42 {
 		t.Fatalf("unexpected wallets")
+	}
+}
+
+func TestClient_RegisterWalletWithBirthday(t *testing.T) {
+	var request junoscan.RegisterWalletRequest
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/wallets", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "birthday_height": 123})
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c, err := junoscan.New(srv.URL)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	birthday := int64(123)
+	response, err := c.RegisterWallet(context.Background(), junoscan.RegisterWalletRequest{
+		WalletID:       " hot ",
+		UFVK:           " ufvk123 ",
+		BirthdayHeight: &birthday,
+	})
+	if err != nil {
+		t.Fatalf("RegisterWallet: %v", err)
+	}
+	if request.WalletID != "hot" || request.UFVK != "ufvk123" || request.BirthdayHeight == nil || *request.BirthdayHeight != 123 {
+		t.Fatalf("unexpected request: %#v", request)
+	}
+	if response.Status != "ok" || response.BirthdayHeight != 123 {
+		t.Fatalf("unexpected response: %#v", response)
+	}
+}
+
+func TestClient_BackfillStatusAndBoundedResume(t *testing.T) {
+	updatedAt := time.Unix(10, 0).UTC()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/wallets/hot/backfill", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"wallet_id":       "hot",
+				"birthday_height": 50,
+				"next_height":     75,
+				"target_height":   100,
+				"state":           "running",
+				"updated_at":      updatedAt,
+			})
+		case http.MethodPost:
+			var request map[string]json.RawMessage
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				http.Error(w, "invalid json", http.StatusBadRequest)
+				return
+			}
+			if _, exists := request["from_height"]; exists {
+				http.Error(w, "resume must omit from_height", http.StatusBadRequest)
+				return
+			}
+			if string(request["to_height"]) != "100" || string(request["batch_size"]) != "25" {
+				http.Error(w, "unexpected bounds", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":         "ok",
+				"wallet_id":      "hot",
+				"from_height":    75,
+				"to_height":      100,
+				"scanned_from":   75,
+				"scanned_to":     99,
+				"next_height":    100,
+				"inserted_notes": 1,
+			})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/v1/wallets/missing/backfill", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "wallet not found", http.StatusNotFound)
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c, err := junoscan.New(srv.URL)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	status, found, err := c.GetWalletBackfillStatus(context.Background(), "hot")
+	if err != nil {
+		t.Fatalf("GetWalletBackfillStatus: %v", err)
+	}
+	if !found || status.State != junoscan.WalletBackfillRunning || status.NextHeight != 75 || !status.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("unexpected status: found=%v status=%#v", found, status)
+	}
+
+	if _, found, err := c.GetWalletBackfillStatus(context.Background(), "missing"); err != nil || found {
+		t.Fatalf("missing status: found=%v err=%v", found, err)
+	}
+
+	response, err := c.ResumeWalletBackfill(context.Background(), "hot", 100, 25)
+	if err != nil {
+		t.Fatalf("ResumeWalletBackfill: %v", err)
+	}
+	if response.NextHeight != 100 || response.ScannedFrom != 75 || response.InsertedNotes != 1 {
+		t.Fatalf("unexpected response: %#v", response)
+	}
+}
+
+func TestClient_BackfillValidation(t *testing.T) {
+	c, err := junoscan.New("http://example.invalid")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	negative := int64(-1)
+	zero := int64(0)
+	one := int64(1)
+	tests := []struct {
+		name    string
+		request junoscan.WalletBackfillRequest
+	}{
+		{name: "negative from", request: junoscan.WalletBackfillRequest{FromHeight: &negative}},
+		{name: "negative to", request: junoscan.WalletBackfillRequest{ToHeight: &negative}},
+		{name: "reversed range", request: junoscan.WalletBackfillRequest{FromHeight: &one, ToHeight: &zero}},
+		{name: "negative batch", request: junoscan.WalletBackfillRequest{BatchSize: -1}},
+		{name: "oversized batch", request: junoscan.WalletBackfillRequest{BatchSize: 10_001}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := c.BackfillWallet(context.Background(), "hot", tt.request); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+	if _, err := c.ResumeWalletBackfill(context.Background(), "hot", 100, 0); err == nil {
+		t.Fatal("expected zero batch validation error")
+	}
+	if err := c.UpsertWalletWithBirthday(context.Background(), "hot", "ufvk", -1); err == nil {
+		t.Fatal("expected birthday validation error")
 	}
 }
 
@@ -199,13 +345,17 @@ func TestClient_HealthEnhancedFields(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"status":         "degraded",
-			"ready":          false,
-			"scanned_height": 120,
-			"scanned_hash":   "block-120",
-			"node_height":    123,
-			"scanner_lag":    3,
-			"max_ready_lag":  2,
+			"status":                  "degraded",
+			"ready":                   false,
+			"network":                 "regtest",
+			"ua_hrp":                  "jregtest",
+			"scanned_height":          120,
+			"scanned_hash":            "block-120",
+			"node_height":             123,
+			"scanner_lag":             3,
+			"max_ready_lag":           2,
+			"history_complete":        false,
+			"history_pending_wallets": 1,
 			"action_index": map[string]any{
 				"indexed_through": 123,
 				"action_heights":  10,
@@ -236,6 +386,9 @@ func TestClient_HealthEnhancedFields(t *testing.T) {
 	}
 	if health.Ready || health.NodeHeight == nil || *health.NodeHeight != 123 || health.ScannerLag == nil || *health.ScannerLag != 3 {
 		t.Fatalf("unexpected health: %#v", health)
+	}
+	if health.Network != "regtest" || health.UAHRP != "jregtest" || health.HistoryComplete == nil || *health.HistoryComplete || health.HistoryPendingWallets == nil || *health.HistoryPendingWallets != 1 {
+		t.Fatalf("unexpected network/history health: %#v", health)
 	}
 	if health.ActionIndex == nil || health.ActionIndex.IndexedThrough != 123 {
 		t.Fatalf("unexpected action index: %#v", health.ActionIndex)

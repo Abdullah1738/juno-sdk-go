@@ -16,6 +16,7 @@ import (
 const (
 	defaultHTTPTimeout              = 15 * time.Second
 	orchardWitnessHTTPTimeoutBudget = 65 * time.Second
+	backfillHTTPTimeoutBudget       = 10*time.Minute + 5*time.Second
 )
 
 type Client struct {
@@ -23,6 +24,7 @@ type Client struct {
 	bearerToken              string
 	httpClient               *http.Client
 	orchardWitnessHTTPClient *http.Client
+	backfillHTTPClient       *http.Client
 }
 
 type Option func(*Client)
@@ -63,6 +65,7 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 		}
 	}
 	c.orchardWitnessHTTPClient = withMinimumTimeout(c.httpClient, orchardWitnessHTTPTimeoutBudget)
+	c.backfillHTTPClient = withMinimumTimeout(c.httpClient, backfillHTTPTimeoutBudget)
 	return c, nil
 }
 
@@ -119,22 +122,110 @@ func (c *Client) Health(ctx context.Context) (HealthResponse, error) {
 }
 
 func (c *Client) UpsertWallet(ctx context.Context, walletID, ufvk string) error {
-	walletID = strings.TrimSpace(walletID)
-	ufvk = strings.TrimSpace(ufvk)
-	if walletID == "" || ufvk == "" {
-		return errors.New("junoscan: wallet_id and ufvk required")
-	}
+	_, err := c.RegisterWallet(ctx, RegisterWalletRequest{WalletID: walletID, UFVK: ufvk})
+	return err
+}
 
-	var resp struct {
-		Status string `json:"status"`
+// UpsertWalletWithBirthday registers or updates a wallet and its earliest
+// scan height. The legacy UpsertWallet method remains available and omits the
+// birthday, preserving the scanner's default of height zero.
+func (c *Client) UpsertWalletWithBirthday(ctx context.Context, walletID, ufvk string, birthdayHeight int64) error {
+	_, err := c.RegisterWallet(ctx, RegisterWalletRequest{
+		WalletID:       walletID,
+		UFVK:           ufvk,
+		BirthdayHeight: &birthdayHeight,
+	})
+	return err
+}
+
+// RegisterWallet performs the typed form of the scanner wallet upsert.
+func (c *Client) RegisterWallet(ctx context.Context, request RegisterWalletRequest) (RegisterWalletResponse, error) {
+	walletID := strings.TrimSpace(request.WalletID)
+	ufvk := strings.TrimSpace(request.UFVK)
+	if walletID == "" || ufvk == "" {
+		return RegisterWalletResponse{}, errors.New("junoscan: wallet_id and ufvk required")
 	}
-	if err := c.doJSON(ctx, http.MethodPost, "/v1/wallets", walletRequest{WalletID: walletID, UFVK: ufvk}, &resp); err != nil {
-		return err
+	if request.BirthdayHeight != nil && *request.BirthdayHeight < 0 {
+		return RegisterWalletResponse{}, errors.New("junoscan: birthday_height must be >= 0")
+	}
+	request.WalletID = walletID
+	request.UFVK = ufvk
+
+	var resp RegisterWalletResponse
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/wallets", request, &resp); err != nil {
+		return RegisterWalletResponse{}, err
 	}
 	if strings.ToLower(strings.TrimSpace(resp.Status)) != "ok" {
-		return errors.New("junoscan: unexpected response")
+		return RegisterWalletResponse{}, errors.New("junoscan: unexpected response")
 	}
-	return nil
+	return resp, nil
+}
+
+// GetWalletBackfillStatus returns persisted scanner progress. A missing wallet
+// is reported as found=false rather than as an error.
+func (c *Client) GetWalletBackfillStatus(ctx context.Context, walletID string) (status WalletBackfillStatus, found bool, err error) {
+	walletID = strings.TrimSpace(walletID)
+	if walletID == "" {
+		return WalletBackfillStatus{}, false, errors.New("junoscan: wallet_id required")
+	}
+
+	path := fmt.Sprintf("/v1/wallets/%s/backfill", url.PathEscape(walletID))
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &status); err != nil {
+		var httpErr *HTTPError
+		if errors.As(err, &httpErr) && httpErr.StatusCode == http.StatusNotFound {
+			return WalletBackfillStatus{}, false, nil
+		}
+		return WalletBackfillStatus{}, false, err
+	}
+	if err := validateWalletBackfillStatus(walletID, status); err != nil {
+		return WalletBackfillStatus{}, false, err
+	}
+	return status, true, nil
+}
+
+// BackfillWallet runs one bounded historical scan pass. Omitting FromHeight
+// resumes from the scanner's persisted progress.
+func (c *Client) BackfillWallet(ctx context.Context, walletID string, request WalletBackfillRequest) (WalletBackfillResponse, error) {
+	walletID = strings.TrimSpace(walletID)
+	if walletID == "" {
+		return WalletBackfillResponse{}, errors.New("junoscan: wallet_id required")
+	}
+	if request.FromHeight != nil && *request.FromHeight < 0 {
+		return WalletBackfillResponse{}, errors.New("junoscan: from_height must be >= 0")
+	}
+	if request.ToHeight != nil && *request.ToHeight < 0 {
+		return WalletBackfillResponse{}, errors.New("junoscan: to_height must be >= 0")
+	}
+	if request.FromHeight != nil && request.ToHeight != nil && *request.ToHeight < *request.FromHeight {
+		return WalletBackfillResponse{}, errors.New("junoscan: to_height must be >= from_height")
+	}
+	if request.BatchSize < 0 || request.BatchSize > 10_000 {
+		return WalletBackfillResponse{}, errors.New("junoscan: batch_size must be between 1 and 10000 when set")
+	}
+
+	path := fmt.Sprintf("/v1/wallets/%s/backfill", url.PathEscape(walletID))
+	var resp WalletBackfillResponse
+	if err := c.doJSONWithClient(ctx, c.backfillHTTPClient, http.MethodPost, path, request, &resp); err != nil {
+		return WalletBackfillResponse{}, err
+	}
+	if strings.ToLower(strings.TrimSpace(resp.Status)) != "ok" || resp.WalletID != walletID || resp.NextHeight < 0 {
+		return WalletBackfillResponse{}, errors.New("junoscan: invalid backfill response")
+	}
+	if request.ToHeight != nil && resp.NextHeight > *request.ToHeight+1 {
+		return WalletBackfillResponse{}, errors.New("junoscan: invalid backfill progress")
+	}
+	return resp, nil
+}
+
+// ResumeWalletBackfill runs one pass from persisted progress through toHeight.
+func (c *Client) ResumeWalletBackfill(ctx context.Context, walletID string, toHeight, batchSize int64) (WalletBackfillResponse, error) {
+	if toHeight < 0 {
+		return WalletBackfillResponse{}, errors.New("junoscan: to_height must be >= 0")
+	}
+	if batchSize < 1 || batchSize > 10_000 {
+		return WalletBackfillResponse{}, errors.New("junoscan: batch_size must be between 1 and 10000")
+	}
+	return c.BackfillWallet(ctx, walletID, WalletBackfillRequest{ToHeight: &toHeight, BatchSize: batchSize})
 }
 
 func (c *Client) ListWallets(ctx context.Context) ([]Wallet, error) {
@@ -376,4 +467,16 @@ func withMinimumTimeout(hc *http.Client, min time.Duration) *http.Client {
 	clone := *hc
 	clone.Timeout = min
 	return &clone
+}
+
+func validateWalletBackfillStatus(walletID string, status WalletBackfillStatus) error {
+	if status.WalletID != walletID || status.BirthdayHeight < 0 || status.NextHeight < status.BirthdayHeight || status.TargetHeight < 0 {
+		return errors.New("junoscan: invalid backfill status")
+	}
+	switch status.State {
+	case WalletBackfillPending, WalletBackfillRunning, WalletBackfillComplete, WalletBackfillError:
+		return nil
+	default:
+		return errors.New("junoscan: invalid backfill state")
+	}
 }

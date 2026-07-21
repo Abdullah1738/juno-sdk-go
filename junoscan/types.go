@@ -8,16 +8,20 @@ import (
 )
 
 type HealthResponse struct {
-	Status        string             `json:"status"`
-	Ready         bool               `json:"ready"`
-	ScannedHeight *int64             `json:"scanned_height,omitempty"`
-	ScannedHash   *string            `json:"scanned_hash,omitempty"`
-	NodeHeight    *int64             `json:"node_height,omitempty"`
-	ScannerLag    *int64             `json:"scanner_lag,omitempty"`
-	MaxReadyLag   *int64             `json:"max_ready_lag,omitempty"`
-	ActionIndex   *HealthActionIndex `json:"action_index,omitempty"`
-	ShardCache    *HealthShardCache  `json:"shard_cache,omitempty"`
-	Backfills     *HealthBackfills   `json:"backfills,omitempty"`
+	Status                string             `json:"status"`
+	Ready                 bool               `json:"ready"`
+	Network               string             `json:"network,omitempty"`
+	UAHRP                 string             `json:"ua_hrp,omitempty"`
+	ScannedHeight         *int64             `json:"scanned_height,omitempty"`
+	ScannedHash           *string            `json:"scanned_hash,omitempty"`
+	NodeHeight            *int64             `json:"node_height,omitempty"`
+	ScannerLag            *int64             `json:"scanner_lag,omitempty"`
+	MaxReadyLag           *int64             `json:"max_ready_lag,omitempty"`
+	HistoryComplete       *bool              `json:"history_complete,omitempty"`
+	HistoryPendingWallets *int               `json:"history_pending_wallets,omitempty"`
+	ActionIndex           *HealthActionIndex `json:"action_index,omitempty"`
+	ShardCache            *HealthShardCache  `json:"shard_cache,omitempty"`
+	Backfills             *HealthBackfills   `json:"backfills,omitempty"`
 }
 
 type HealthActionIndex struct {
@@ -41,9 +45,63 @@ type HealthBackfills struct {
 }
 
 type Wallet struct {
-	WalletID   string     `json:"wallet_id"`
-	CreatedAt  time.Time  `json:"created_at"`
-	DisabledAt *time.Time `json:"disabled_at,omitempty"`
+	WalletID       string     `json:"wallet_id"`
+	BirthdayHeight int64      `json:"birthday_height"`
+	CreatedAt      time.Time  `json:"created_at"`
+	DisabledAt     *time.Time `json:"disabled_at,omitempty"`
+}
+
+type RegisterWalletRequest struct {
+	WalletID       string `json:"wallet_id"`
+	UFVK           string `json:"ufvk"`
+	BirthdayHeight *int64 `json:"birthday_height,omitempty"`
+}
+
+type RegisterWalletResponse struct {
+	Status         string `json:"status"`
+	BirthdayHeight int64  `json:"birthday_height"`
+}
+
+type WalletBackfillState string
+
+const (
+	WalletBackfillPending  WalletBackfillState = "pending"
+	WalletBackfillRunning  WalletBackfillState = "running"
+	WalletBackfillComplete WalletBackfillState = "complete"
+	WalletBackfillError    WalletBackfillState = "error"
+)
+
+type WalletBackfillStatus struct {
+	WalletID       string              `json:"wallet_id"`
+	BirthdayHeight int64               `json:"birthday_height"`
+	NextHeight     int64               `json:"next_height"`
+	TargetHeight   int64               `json:"target_height"`
+	State          WalletBackfillState `json:"state"`
+	LastError      string              `json:"last_error,omitempty"`
+	UpdatedAt      time.Time           `json:"updated_at"`
+}
+
+// WalletBackfillRequest controls one bounded scanner pass. Leave FromHeight
+// nil to resume from the scanner's persisted NextHeight.
+type WalletBackfillRequest struct {
+	FromHeight *int64 `json:"from_height,omitempty"`
+	ToHeight   *int64 `json:"to_height,omitempty"`
+	BatchSize  int64  `json:"batch_size,omitempty"`
+}
+
+type WalletBackfillResponse struct {
+	Status               string `json:"status"`
+	WalletID             string `json:"wallet_id"`
+	FromHeight           int64  `json:"from_height"`
+	ToHeight             int64  `json:"to_height"`
+	ScannedFrom          int64  `json:"scanned_from"`
+	ScannedTo            int64  `json:"scanned_to"`
+	NextHeight           int64  `json:"next_height"`
+	InsertedNotes        int64  `json:"inserted_notes"`
+	InsertedEvents       int64  `json:"inserted_events"`
+	VisitedActionHeights int64  `json:"visited_action_heights"`
+	SkippedHeights       int64  `json:"skipped_heights"`
+	RPCCalls             int64  `json:"rpc_calls"`
 }
 
 type WalletEvent struct {
@@ -124,9 +182,4 @@ type OrchardWitnessResponse struct {
 	AnchorHeight int64                `json:"anchor_height"`
 	Root         string               `json:"root"`
 	Paths        []OrchardWitnessPath `json:"paths"`
-}
-
-type walletRequest struct {
-	WalletID string `json:"wallet_id"`
-	UFVK     string `json:"ufvk"`
 }
