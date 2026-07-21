@@ -33,10 +33,15 @@ type BrokerEnvelope struct {
 	Payload  json.RawMessage `json:"payload"`
 }
 
+type DepositOrigin string
+
+const DepositOriginExternal DepositOrigin = "external"
+
 type DepositEventPayload struct {
 	DepositEvent
-	RecipientAddress string `json:"recipient_address,omitempty"`
-	NoteNullifier    string `json:"note_nullifier,omitempty"`
+	Origin           DepositOrigin `json:"origin"`
+	RecipientAddress string        `json:"recipient_address,omitempty"`
+	NoteNullifier    string        `json:"note_nullifier,omitempty"`
 }
 
 type DepositConfirmedPayload struct {

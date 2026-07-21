@@ -2,6 +2,8 @@ package junoscan_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net"
@@ -14,6 +16,11 @@ import (
 	"github.com/Abdullah1738/juno-sdk-go/junoscan"
 	"github.com/Abdullah1738/juno-sdk-go/types"
 )
+
+func fingerprint(value string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(value)))
+	return hex.EncodeToString(sum[:])
+}
 
 func TestClient_UpsertWalletAndList(t *testing.T) {
 	var (
@@ -32,11 +39,11 @@ func TestClient_UpsertWalletAndList(t *testing.T) {
 			}
 			gotWalletID = strings.TrimSpace(req["wallet_id"])
 			gotUFVK = strings.TrimSpace(req["ufvk"])
-			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "birthday_height": 0, "ufvk_fingerprint": fingerprint("ufvk123")})
 		case http.MethodGet:
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"wallets": []map[string]any{
-					{"wallet_id": "hot", "birthday_height": 42, "created_at": time.Unix(1, 0).UTC()},
+					{"wallet_id": "hot", "ufvk_fingerprint": fingerprint("ufvk123"), "birthday_height": 42, "created_at": time.Unix(1, 0).UTC()},
 				},
 			})
 		default:
@@ -69,7 +76,7 @@ func TestClient_UpsertWalletAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListWallets: %v", err)
 	}
-	if len(wallets) != 1 || wallets[0].WalletID != "hot" || wallets[0].BirthdayHeight != 42 {
+	if len(wallets) != 1 || wallets[0].WalletID != "hot" || wallets[0].UFVKFingerprint != fingerprint("ufvk123") || wallets[0].BirthdayHeight != 42 {
 		t.Fatalf("unexpected wallets")
 	}
 }
@@ -86,7 +93,7 @@ func TestClient_RegisterWalletWithBirthday(t *testing.T) {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "birthday_height": 123})
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "birthday_height": 123, "ufvk_fingerprint": fingerprint("ufvk123")})
 	})
 
 	srv := httptest.NewServer(mux)
@@ -108,7 +115,7 @@ func TestClient_RegisterWalletWithBirthday(t *testing.T) {
 	if request.WalletID != "hot" || request.UFVK != "ufvk123" || request.BirthdayHeight == nil || *request.BirthdayHeight != 123 {
 		t.Fatalf("unexpected request: %#v", request)
 	}
-	if response.Status != "ok" || response.BirthdayHeight != 123 {
+	if response.Status != "ok" || response.BirthdayHeight != 123 || response.UFVKFingerprint != fingerprint("ufvk123") {
 		t.Fatalf("unexpected response: %#v", response)
 	}
 }
@@ -120,12 +127,13 @@ func TestClient_BackfillStatusAndBoundedResume(t *testing.T) {
 		switch r.Method {
 		case http.MethodGet:
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"wallet_id":       "hot",
-				"birthday_height": 50,
-				"next_height":     75,
-				"target_height":   100,
-				"state":           "running",
-				"updated_at":      updatedAt,
+				"wallet_id":        "hot",
+				"ufvk_fingerprint": fingerprint("ufvk123"),
+				"birthday_height":  50,
+				"next_height":      75,
+				"target_height":    100,
+				"state":            "running",
+				"updated_at":       updatedAt,
 			})
 		case http.MethodPost:
 			var request map[string]json.RawMessage
@@ -170,7 +178,7 @@ func TestClient_BackfillStatusAndBoundedResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetWalletBackfillStatus: %v", err)
 	}
-	if !found || status.State != junoscan.WalletBackfillRunning || status.NextHeight != 75 || !status.UpdatedAt.Equal(updatedAt) {
+	if !found || status.UFVKFingerprint != fingerprint("ufvk123") || status.State != junoscan.WalletBackfillRunning || status.NextHeight != 75 || !status.UpdatedAt.Equal(updatedAt) {
 		t.Fatalf("unexpected status: found=%v status=%#v", found, status)
 	}
 
@@ -221,6 +229,7 @@ func TestClient_BackfillValidation(t *testing.T) {
 }
 
 func TestClient_ListWalletEvents(t *testing.T) {
+	eventEpoch := strings.Repeat("e", 64)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/wallets/hot/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -237,16 +246,17 @@ func TestClient_ListWalletEvents(t *testing.T) {
 		}
 
 		_ = json.NewEncoder(w).Encode(map[string]any{
+			"event_epoch": eventEpoch,
 			"events": []map[string]any{
 				{
 					"id":         8,
 					"kind":       string(types.WalletEventKindDepositEvent),
 					"height":     100,
-					"payload":    json.RawMessage(`{"txid":"deadbeef"}`),
+					"payload":    json.RawMessage(`{"origin":"external","txid":"deadbeef"}`),
 					"created_at": time.Unix(2, 0).UTC(),
 				},
 			},
-			"next_cursor": 9,
+			"next_cursor": 8,
 		})
 	})
 
@@ -265,12 +275,86 @@ func TestClient_ListWalletEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListWalletEvents: %v", err)
 	}
-	if page.NextCursor != 9 || len(page.Events) != 1 {
+	if page.EventEpoch != eventEpoch || page.NextCursor != 8 || len(page.Events) != 1 {
 		t.Fatalf("unexpected page")
 	}
 	if page.Events[0].Kind != types.WalletEventKindDepositEvent {
 		t.Fatalf("kind=%q", page.Events[0].Kind)
 	}
+	var payload types.DepositEventPayload
+	if err := json.Unmarshal(page.Events[0].Payload, &payload); err != nil || payload.Origin != types.DepositOriginExternal {
+		t.Fatalf("payload=%#v err=%v", payload, err)
+	}
+}
+
+func TestClient_RejectsInvalidScannerIdentityMetadata(t *testing.T) {
+	t.Run("health epoch", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "event_epoch": "missing"})
+		}))
+		defer srv.Close()
+		client, err := junoscan.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.Health(context.Background()); err == nil {
+			t.Fatal("expected invalid event epoch rejection")
+		}
+	})
+
+	t.Run("wallet fingerprint", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.Method {
+			case http.MethodPost:
+				_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "birthday_height": 0, "ufvk_fingerprint": strings.Repeat("f", 64)})
+			case http.MethodGet:
+				_ = json.NewEncoder(w).Encode(map[string]any{"wallets": []map[string]any{{"wallet_id": "hot", "birthday_height": 0, "ufvk_fingerprint": "invalid"}}})
+			}
+		}))
+		defer srv.Close()
+		client, err := junoscan.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.RegisterWallet(context.Background(), junoscan.RegisterWalletRequest{WalletID: "hot", UFVK: "ufvk123"}); err == nil {
+			t.Fatal("expected mismatched registration fingerprint rejection")
+		}
+		if _, err := client.ListWallets(context.Background()); err == nil {
+			t.Fatal("expected invalid listed fingerprint rejection")
+		}
+	})
+
+	t.Run("backfill fingerprint", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"wallet_id": "hot", "birthday_height": 0, "next_height": 0, "target_height": 0, "state": "pending", "updated_at": time.Unix(1, 0).UTC()})
+		}))
+		defer srv.Close()
+		client, err := junoscan.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := client.GetWalletBackfillStatus(context.Background(), "hot"); err == nil {
+			t.Fatal("expected missing backfill fingerprint rejection")
+		}
+	})
+
+	t.Run("event epoch and cursor", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"event_epoch": strings.Repeat("e", 64),
+				"events":      []map[string]any{{"id": 8, "kind": "DepositEvent", "height": 1, "payload": map[string]any{"origin": "external"}, "created_at": time.Unix(1, 0).UTC()}},
+				"next_cursor": 9,
+			})
+		}))
+		defer srv.Close()
+		client, err := junoscan.New(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := client.ListWalletEvents(context.Background(), "hot", 7, 100); err == nil {
+			t.Fatal("expected inconsistent event cursor rejection")
+		}
+	})
 }
 
 func TestClient_HTTPErrorIncludesStatusCode(t *testing.T) {
@@ -342,11 +426,13 @@ func TestClient_BearerTokenAndStructuredHTTPError(t *testing.T) {
 }
 
 func TestClient_HealthEnhancedFields(t *testing.T) {
+	eventEpoch := strings.Repeat("e", 64)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status":                  "degraded",
 			"ready":                   false,
+			"event_epoch":             eventEpoch,
 			"network":                 "regtest",
 			"ua_hrp":                  "jregtest",
 			"scanned_height":          120,
@@ -384,7 +470,7 @@ func TestClient_HealthEnhancedFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Health: %v", err)
 	}
-	if health.Ready || health.NodeHeight == nil || *health.NodeHeight != 123 || health.ScannerLag == nil || *health.ScannerLag != 3 {
+	if health.Ready || health.EventEpoch != eventEpoch || health.NodeHeight == nil || *health.NodeHeight != 123 || health.ScannerLag == nil || *health.ScannerLag != 3 {
 		t.Fatalf("unexpected health: %#v", health)
 	}
 	if health.Network != "regtest" || health.UAHRP != "jregtest" || health.HistoryComplete == nil || *health.HistoryComplete || health.HistoryPendingWallets == nil || *health.HistoryPendingWallets != 1 {

@@ -3,6 +3,8 @@ package junoscan
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -118,6 +120,9 @@ func (c *Client) Health(ctx context.Context) (HealthResponse, error) {
 	if err := c.doJSON(ctx, http.MethodGet, "/v1/health", nil, &resp); err != nil {
 		return HealthResponse{}, err
 	}
+	if !isLowerHex64(resp.EventEpoch) {
+		return HealthResponse{}, errors.New("junoscan: invalid event_epoch")
+	}
 	return resp, nil
 }
 
@@ -155,7 +160,7 @@ func (c *Client) RegisterWallet(ctx context.Context, request RegisterWalletReque
 	if err := c.doJSON(ctx, http.MethodPost, "/v1/wallets", request, &resp); err != nil {
 		return RegisterWalletResponse{}, err
 	}
-	if strings.ToLower(strings.TrimSpace(resp.Status)) != "ok" {
+	if strings.ToLower(strings.TrimSpace(resp.Status)) != "ok" || resp.BirthdayHeight < 0 || !isLowerHex64(resp.UFVKFingerprint) || resp.UFVKFingerprint != ufvkFingerprint(ufvk) {
 		return RegisterWalletResponse{}, errors.New("junoscan: unexpected response")
 	}
 	return resp, nil
@@ -235,6 +240,11 @@ func (c *Client) ListWallets(ctx context.Context) ([]Wallet, error) {
 	if err := c.doJSON(ctx, http.MethodGet, "/v1/wallets", nil, &resp); err != nil {
 		return nil, err
 	}
+	for _, wallet := range resp.Wallets {
+		if strings.TrimSpace(wallet.WalletID) == "" || !isLowerHex64(wallet.UFVKFingerprint) || wallet.BirthdayHeight < 0 {
+			return nil, errors.New("junoscan: invalid wallet identity")
+		}
+	}
 	return resp.Wallets, nil
 }
 
@@ -242,6 +252,9 @@ func (c *Client) ListWalletEvents(ctx context.Context, walletID string, cursor i
 	walletID = strings.TrimSpace(walletID)
 	if walletID == "" {
 		return WalletEventsPage{}, errors.New("junoscan: wallet_id required")
+	}
+	if cursor < 0 {
+		return WalletEventsPage{}, errors.New("junoscan: cursor must be >= 0")
 	}
 	if limit <= 0 {
 		limit = 100
@@ -254,6 +267,19 @@ func (c *Client) ListWalletEvents(ctx context.Context, walletID string, cursor i
 	var resp WalletEventsPage
 	if err := c.doJSON(ctx, http.MethodGet, path, nil, &resp); err != nil {
 		return WalletEventsPage{}, err
+	}
+	if !isLowerHex64(resp.EventEpoch) || resp.NextCursor < cursor {
+		return WalletEventsPage{}, errors.New("junoscan: invalid wallet events page")
+	}
+	position := cursor
+	for _, event := range resp.Events {
+		if event.ID <= position {
+			return WalletEventsPage{}, errors.New("junoscan: invalid wallet events page")
+		}
+		position = event.ID
+	}
+	if resp.NextCursor != position {
+		return WalletEventsPage{}, errors.New("junoscan: invalid wallet events cursor")
 	}
 	return resp, nil
 }
@@ -470,7 +496,7 @@ func withMinimumTimeout(hc *http.Client, min time.Duration) *http.Client {
 }
 
 func validateWalletBackfillStatus(walletID string, status WalletBackfillStatus) error {
-	if status.WalletID != walletID || status.BirthdayHeight < 0 || status.NextHeight < status.BirthdayHeight || status.TargetHeight < 0 {
+	if status.WalletID != walletID || !isLowerHex64(status.UFVKFingerprint) || status.BirthdayHeight < 0 || status.NextHeight < status.BirthdayHeight || status.TargetHeight < 0 {
 		return errors.New("junoscan: invalid backfill status")
 	}
 	switch status.State {
@@ -479,4 +505,21 @@ func validateWalletBackfillStatus(walletID string, status WalletBackfillStatus) 
 	default:
 		return errors.New("junoscan: invalid backfill state")
 	}
+}
+
+func ufvkFingerprint(ufvk string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(ufvk)))
+	return hex.EncodeToString(sum[:])
+}
+
+func isLowerHex64(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return false
+		}
+	}
+	return true
 }

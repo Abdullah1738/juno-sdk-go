@@ -10,6 +10,7 @@ import (
 type HealthResponse struct {
 	Status                string             `json:"status"`
 	Ready                 bool               `json:"ready"`
+	EventEpoch            string             `json:"event_epoch"`
 	Network               string             `json:"network,omitempty"`
 	UAHRP                 string             `json:"ua_hrp,omitempty"`
 	ScannedHeight         *int64             `json:"scanned_height,omitempty"`
@@ -45,10 +46,11 @@ type HealthBackfills struct {
 }
 
 type Wallet struct {
-	WalletID       string     `json:"wallet_id"`
-	BirthdayHeight int64      `json:"birthday_height"`
-	CreatedAt      time.Time  `json:"created_at"`
-	DisabledAt     *time.Time `json:"disabled_at,omitempty"`
+	WalletID        string     `json:"wallet_id"`
+	UFVKFingerprint string     `json:"ufvk_fingerprint"`
+	BirthdayHeight  int64      `json:"birthday_height"`
+	CreatedAt       time.Time  `json:"created_at"`
+	DisabledAt      *time.Time `json:"disabled_at,omitempty"`
 }
 
 type RegisterWalletRequest struct {
@@ -58,8 +60,9 @@ type RegisterWalletRequest struct {
 }
 
 type RegisterWalletResponse struct {
-	Status         string `json:"status"`
-	BirthdayHeight int64  `json:"birthday_height"`
+	Status          string `json:"status"`
+	BirthdayHeight  int64  `json:"birthday_height"`
+	UFVKFingerprint string `json:"ufvk_fingerprint"`
 }
 
 type WalletBackfillState string
@@ -72,13 +75,14 @@ const (
 )
 
 type WalletBackfillStatus struct {
-	WalletID       string              `json:"wallet_id"`
-	BirthdayHeight int64               `json:"birthday_height"`
-	NextHeight     int64               `json:"next_height"`
-	TargetHeight   int64               `json:"target_height"`
-	State          WalletBackfillState `json:"state"`
-	LastError      string              `json:"last_error,omitempty"`
-	UpdatedAt      time.Time           `json:"updated_at"`
+	WalletID        string              `json:"wallet_id"`
+	UFVKFingerprint string              `json:"ufvk_fingerprint"`
+	BirthdayHeight  int64               `json:"birthday_height"`
+	NextHeight      int64               `json:"next_height"`
+	TargetHeight    int64               `json:"target_height"`
+	State           WalletBackfillState `json:"state"`
+	LastError       string              `json:"last_error,omitempty"`
+	UpdatedAt       time.Time           `json:"updated_at"`
 }
 
 // WalletBackfillRequest controls one bounded scanner pass. Leave FromHeight
@@ -115,6 +119,7 @@ type WalletEvent struct {
 type WalletEventsPage struct {
 	Events     []WalletEvent `json:"events"`
 	NextCursor int64         `json:"next_cursor"`
+	EventEpoch string        `json:"event_epoch"`
 }
 
 type WalletNote struct {

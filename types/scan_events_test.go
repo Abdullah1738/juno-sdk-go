@@ -50,6 +50,7 @@ func TestDepositConfirmedPayload_JSONRoundTrip(t *testing.T) {
 					Confirmations: 10,
 				},
 			},
+			Origin:           types.DepositOriginExternal,
 			RecipientAddress: "j1recipient",
 			NoteNullifier:    "nullifier",
 		},
@@ -69,5 +70,8 @@ func TestDepositConfirmedPayload_JSONRoundTrip(t *testing.T) {
 
 	if !reflect.DeepEqual(in, out) {
 		t.Fatalf("round-trip mismatch:\n  in=%#v\n out=%#v", in, out)
+	}
+	if out.Origin != types.DepositOriginExternal {
+		t.Fatalf("origin=%q", out.Origin)
 	}
 }
