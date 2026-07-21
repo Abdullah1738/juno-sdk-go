@@ -28,6 +28,7 @@ type JunocashdConfig struct {
 	JunocashCLI   string
 	RPCUser       string
 	RPCPassword   string
+	TxIndex       bool
 }
 
 type RunningJunocashd struct {
@@ -101,6 +102,9 @@ func StartJunocashd(ctx context.Context, cfg JunocashdConfig) (*RunningJunocashd
 		fmt.Sprintf("-rpcuser=%s", rpcUser),
 		fmt.Sprintf("-rpcpassword=%s", rpcPass),
 		fmt.Sprintf("-port=%d", p2pPort),
+	}
+	if cfg.TxIndex {
+		args = append(args, "-txindex=1")
 	}
 
 	cmd := exec.CommandContext(ctx, bin, args...)

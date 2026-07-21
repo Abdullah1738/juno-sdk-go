@@ -20,6 +20,7 @@ const (
 
 type Client struct {
 	baseURL                  string
+	bearerToken              string
 	httpClient               *http.Client
 	orchardWitnessHTTPClient *http.Client
 }
@@ -31,6 +32,14 @@ func WithHTTPClient(hc *http.Client) Option {
 		if hc != nil {
 			c.httpClient = hc
 		}
+	}
+}
+
+// WithBearerToken configures the token sent to authenticated juno-scan APIs.
+// An empty token leaves the Authorization header unset.
+func WithBearerToken(token string) Option {
+	return func(c *Client) {
+		c.bearerToken = strings.TrimSpace(token)
 	}
 }
 
@@ -59,15 +68,46 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 
 type HTTPError struct {
 	StatusCode int
+	Status     string
+	Code       string
+	Message    string
+	Retryable  bool
+	Details    json.RawMessage
 	Body       string
 }
 
 func (e *HTTPError) Error() string {
-	body := strings.TrimSpace(e.Body)
-	if body == "" {
+	if e == nil {
+		return "junoscan: http error <nil>"
+	}
+	code := strings.TrimSpace(e.Code)
+	message := strings.TrimSpace(e.Message)
+	if code != "" && message != "" {
+		return fmt.Sprintf("junoscan: http %d: %s: %s", e.StatusCode, code, message)
+	}
+	if code != "" {
+		return fmt.Sprintf("junoscan: http %d: %s", e.StatusCode, code)
+	}
+	if message == "" {
+		message = strings.TrimSpace(e.Body)
+	}
+	if message == "" {
+		message = strings.TrimSpace(e.Status)
+	}
+	if message == "" {
 		return fmt.Sprintf("junoscan: http %d", e.StatusCode)
 	}
-	return fmt.Sprintf("junoscan: http %d: %s", e.StatusCode, body)
+	return fmt.Sprintf("junoscan: http %d: %s", e.StatusCode, message)
+}
+
+// Temporary reports whether retrying the request may succeed without changing
+// it. Explicit upstream metadata takes precedence; throttling and 5xx errors
+// are otherwise treated as temporary.
+func (e *HTTPError) Temporary() bool {
+	if e == nil {
+		return false
+	}
+	return e.Retryable || e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500
 }
 
 func (c *Client) Health(ctx context.Context) (HealthResponse, error) {
@@ -167,6 +207,9 @@ func (c *Client) ListWalletNotesPage(ctx context.Context, walletID string, opts 
 	if opts.MinValueZat > 0 {
 		params.Set("min_value_zat", fmt.Sprintf("%d", opts.MinValueZat))
 	}
+	if recipientAddress := strings.TrimSpace(opts.RecipientAddress); recipientAddress != "" {
+		params.Set("recipient_address", recipientAddress)
+	}
 	cursor := strings.TrimSpace(opts.Cursor)
 	if cursor != "" {
 		params.Set("cursor", cursor)
@@ -176,6 +219,43 @@ func (c *Client) ListWalletNotesPage(ctx context.Context, walletID string, opts 
 	var resp WalletNotesPage
 	if err := c.doJSON(ctx, http.MethodGet, path, nil, &resp); err != nil {
 		return WalletNotesPage{}, err
+	}
+	return resp, nil
+}
+
+// AddressBalance returns the scanner's on-chain balance buckets for one
+// recipient address owned by a registered wallet.
+func (c *Client) AddressBalance(ctx context.Context, walletID, address string, minConfirmations int64) (AddressBalanceResponse, error) {
+	return c.GetAddressBalance(ctx, AddressBalanceRequest{
+		WalletID:         walletID,
+		RecipientAddress: address,
+		MinConfirmations: minConfirmations,
+	})
+}
+
+// GetAddressBalance is the request-struct form of AddressBalance.
+func (c *Client) GetAddressBalance(ctx context.Context, request AddressBalanceRequest) (AddressBalanceResponse, error) {
+	walletID := strings.TrimSpace(request.WalletID)
+	address := strings.TrimSpace(request.RecipientAddress)
+	if walletID == "" {
+		return AddressBalanceResponse{}, errors.New("junoscan: wallet_id required")
+	}
+	if address == "" {
+		return AddressBalanceResponse{}, errors.New("junoscan: address required")
+	}
+	if request.MinConfirmations < 0 {
+		return AddressBalanceResponse{}, errors.New("junoscan: min_confirmations must be >= 0")
+	}
+
+	path := fmt.Sprintf(
+		"/v1/wallets/%s/addresses/%s/balance?min_confirmations=%d",
+		url.PathEscape(walletID),
+		url.PathEscape(address),
+		request.MinConfirmations,
+	)
+	var resp AddressBalanceResponse
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return AddressBalanceResponse{}, err
 	}
 	return resp, nil
 }
@@ -221,6 +301,9 @@ func (c *Client) doJSONWithClient(ctx context.Context, hc *http.Client, method, 
 		return errors.New("junoscan: build request")
 	}
 	req.Header.Set("Accept", "application/json")
+	if c.bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearerToken)
+	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -232,10 +315,13 @@ func (c *Client) doJSONWithClient(ctx context.Context, hc *http.Client, method, 
 	defer resp.Body.Close()
 
 	const maxBody = 1 << 20
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	if readErr != nil {
+		return fmt.Errorf("junoscan: read response: %w", readErr)
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return &HTTPError{StatusCode: resp.StatusCode, Body: string(raw)}
+		return newHTTPError(resp, raw)
 	}
 	if out == nil {
 		return nil
@@ -244,6 +330,40 @@ func (c *Client) doJSONWithClient(ctx context.Context, hc *http.Client, method, 
 		return errors.New("junoscan: invalid json response")
 	}
 	return nil
+}
+
+func newHTTPError(resp *http.Response, raw []byte) *HTTPError {
+	err := &HTTPError{
+		StatusCode: resp.StatusCode,
+		Status:     resp.Status,
+		Body:       string(raw),
+	}
+	var envelope struct {
+		Error struct {
+			Code      string          `json:"code"`
+			Message   string          `json:"message"`
+			Retryable bool            `json:"retryable"`
+			Details   json.RawMessage `json:"details"`
+		} `json:"error"`
+		Code      string          `json:"code"`
+		Message   string          `json:"message"`
+		Retryable bool            `json:"retryable"`
+		Details   json.RawMessage `json:"details"`
+	}
+	if json.Unmarshal(raw, &envelope) == nil {
+		if strings.TrimSpace(envelope.Error.Code) != "" || strings.TrimSpace(envelope.Error.Message) != "" {
+			err.Code = strings.TrimSpace(envelope.Error.Code)
+			err.Message = strings.TrimSpace(envelope.Error.Message)
+			err.Retryable = envelope.Error.Retryable
+			err.Details = envelope.Error.Details
+		} else {
+			err.Code = strings.TrimSpace(envelope.Code)
+			err.Message = strings.TrimSpace(envelope.Message)
+			err.Retryable = envelope.Retryable
+			err.Details = envelope.Details
+		}
+	}
+	return err
 }
 
 func withMinimumTimeout(hc *http.Client, min time.Duration) *http.Client {

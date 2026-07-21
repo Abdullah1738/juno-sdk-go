@@ -60,6 +60,20 @@ func (c *Client) GetRawTransactionHex(ctx context.Context, txid string) (string,
 	return out, nil
 }
 
+// GetRawTransactionVerbose returns the daemon's decoded transaction response.
+// The daemon requires txindex for arbitrary confirmed transaction lookups.
+// When includeRaw is false, Hex is cleared before the result is returned.
+func (c *Client) GetRawTransactionVerbose(ctx context.Context, txid string, includeRaw bool) (*RawTransactionVerbose, error) {
+	var out RawTransactionVerbose
+	if err := c.Call(ctx, "getrawtransaction", []any{txid, 1}, &out); err != nil {
+		return nil, err
+	}
+	if !includeRaw {
+		out.Hex = ""
+	}
+	return &out, nil
+}
+
 func (c *Client) SendRawTransaction(ctx context.Context, txHex string) (string, error) {
 	var out string
 	if err := c.Call(ctx, "sendrawtransaction", []any{txHex}, &out); err != nil {

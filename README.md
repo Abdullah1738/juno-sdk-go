@@ -28,5 +28,7 @@ Set `JUNO_TEST_LOG=1` to show `junocashd` logs while running tests (it also enab
 
 ## Packages
 
-- `junocashd`: typed JSON-RPC client helpers for `junocashd` (blocks, headers, tx broadcast)
+- `junocashd`: typed JSON-RPC client helpers for `junocashd` (blocks, headers, verbose transaction lookup, tx broadcast)
+- `junoscan`: authenticated client helpers for scanner health, wallets, events, notes, address balances, and Orchard witnesses
+- `junobroadcast`: typed client helpers for signed transaction submission and status polling
 - `types`: shared payload types (TxPlan, DepositEvent, ChainCursor, stable error codes)

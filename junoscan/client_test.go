@@ -154,6 +154,100 @@ func TestClient_HTTPErrorIncludesStatusCode(t *testing.T) {
 	}
 }
 
+func TestClient_BearerTokenAndStructuredHTTPError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer scanner-secret" {
+			t.Fatalf("authorization=%q", got)
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"code":      "scanner_not_ready",
+				"message":   "scanner is behind node tip",
+				"retryable": true,
+				"details":   map[string]any{"scanner_lag": 9},
+			},
+		})
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	c, err := junoscan.New(srv.URL, junoscan.WithBearerToken(" scanner-secret "))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, err = c.Health(context.Background())
+	var httpErr *junoscan.HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("expected HTTPError, got %T: %v", err, err)
+	}
+	if httpErr.StatusCode != http.StatusServiceUnavailable || httpErr.Code != "scanner_not_ready" {
+		t.Fatalf("unexpected error: %#v", httpErr)
+	}
+	if !httpErr.Temporary() || !httpErr.Retryable {
+		t.Fatalf("expected retryable error: %#v", httpErr)
+	}
+	if !strings.Contains(string(httpErr.Details), `"scanner_lag":9`) {
+		t.Fatalf("details=%s", httpErr.Details)
+	}
+}
+
+func TestClient_HealthEnhancedFields(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":         "degraded",
+			"ready":          false,
+			"scanned_height": 120,
+			"scanned_hash":   "block-120",
+			"node_height":    123,
+			"scanner_lag":    3,
+			"max_ready_lag":  2,
+			"action_index": map[string]any{
+				"indexed_through": 123,
+				"action_heights":  10,
+			},
+			"shard_cache": map[string]any{
+				"enabled":         true,
+				"version":         1,
+				"leaf_count":      4096,
+				"next_index":      4,
+				"complete_roots":  4,
+				"remaining_roots": 1,
+				"last_error":      "",
+			},
+			"backfills": map[string]any{"active": 1, "queue_depth": 2},
+		})
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c, err := junoscan.New(srv.URL)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	health, err := c.Health(context.Background())
+	if err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+	if health.Ready || health.NodeHeight == nil || *health.NodeHeight != 123 || health.ScannerLag == nil || *health.ScannerLag != 3 {
+		t.Fatalf("unexpected health: %#v", health)
+	}
+	if health.ActionIndex == nil || health.ActionIndex.IndexedThrough != 123 {
+		t.Fatalf("unexpected action index: %#v", health.ActionIndex)
+	}
+	if health.ShardCache == nil || health.ShardCache.LeafCount != 4096 || health.ShardCache.RemainingRoots != 1 {
+		t.Fatalf("unexpected shard cache: %#v", health.ShardCache)
+	}
+	if health.Backfills == nil || health.Backfills.Active != 1 || health.Backfills.QueueDepth != 2 {
+		t.Fatalf("unexpected backfills: %#v", health.Backfills)
+	}
+}
+
 func TestClient_ListWalletNotesPage(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/wallets/hot/notes", func(w http.ResponseWriter, r *http.Request) {
@@ -176,6 +270,10 @@ func TestClient_ListWalletNotesPage(t *testing.T) {
 		}
 		if q.Get("min_value_zat") != "1234" {
 			http.Error(w, "bad min_value_zat", http.StatusBadRequest)
+			return
+		}
+		if q.Get("recipient_address") != "jregtest1recipient" {
+			http.Error(w, "bad recipient_address", http.StatusBadRequest)
 			return
 		}
 		if q.Get("cursor") != "11:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0" {
@@ -211,11 +309,12 @@ func TestClient_ListWalletNotesPage(t *testing.T) {
 	defer cancel()
 
 	page, err := c.ListWalletNotesPage(ctx, "hot", junoscan.ListWalletNotesOptions{
-		OnlyUnspent: true,
-		Direction:   "incoming",
-		Limit:       200,
-		MinValueZat: 1234,
-		Cursor:      "11:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
+		OnlyUnspent:      true,
+		Direction:        "incoming",
+		Limit:            200,
+		MinValueZat:      1234,
+		RecipientAddress: " jregtest1recipient ",
+		Cursor:           "11:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0",
 	})
 	if err != nil {
 		t.Fatalf("ListWalletNotesPage: %v", err)
@@ -225,6 +324,72 @@ func TestClient_ListWalletNotesPage(t *testing.T) {
 	}
 	if page.NextCursor == "" {
 		t.Fatalf("expected next_cursor")
+	}
+}
+
+func TestClient_AddressBalance(t *testing.T) {
+	const address = "jregtest1recipient"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/wallets/hot/addresses/"+address+"/balance", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if r.URL.Query().Get("min_confirmations") != "100" {
+			http.Error(w, "bad min_confirmations", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(junoscan.AddressBalanceResponse{
+			WalletID:           "hot",
+			RecipientAddress:   address,
+			AvailableZat:       1000,
+			PendingIncomingZat: 200,
+			PendingOutgoingZat: 300,
+			TotalUnspentZat:    1500,
+			MinConfirmations:   100,
+			AsOfNodeHeight:     200,
+			AsOfScannerHeight:  198,
+			ScannerLag:         2,
+		})
+	})
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c, err := junoscan.New(srv.URL)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	balance, err := c.AddressBalance(context.Background(), "hot", address, 100)
+	if err != nil {
+		t.Fatalf("AddressBalance: %v", err)
+	}
+	if balance.AvailableZat != 1000 || balance.PendingIncomingZat != 200 || balance.ScannerLag != 2 {
+		t.Fatalf("unexpected balance: %#v", balance)
+	}
+}
+
+func TestClient_AddressBalanceValidatesInput(t *testing.T) {
+	c, err := junoscan.New("http://example.invalid")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tests := []struct {
+		name     string
+		walletID string
+		address  string
+		minConfs int64
+	}{
+		{name: "wallet", address: "addr"},
+		{name: "address", walletID: "hot"},
+		{name: "confirmations", walletID: "hot", address: "addr", minConfs: -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := c.AddressBalance(context.Background(), tt.walletID, tt.address, tt.minConfs); err == nil {
+				t.Fatalf("expected error")
+			}
+		})
 	}
 }
 

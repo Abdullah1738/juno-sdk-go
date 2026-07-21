@@ -140,8 +140,10 @@ func TestClient_APIErrorContainsCode(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"error": map[string]any{
-				"code":    "invalid_request",
-				"message": "nope",
+				"code":      "scanner_not_ready",
+				"message":   "nope",
+				"retryable": true,
+				"details":   map[string]any{"lag": 4},
 			},
 		})
 	})
@@ -162,7 +164,10 @@ func TestClient_APIErrorContainsCode(t *testing.T) {
 	if !errors.As(err, &ae) {
 		t.Fatalf("expected APIError, got %T", err)
 	}
-	if ae.Code != "invalid_request" {
+	if ae.Code != "scanner_not_ready" {
 		t.Fatalf("code=%q", ae.Code)
+	}
+	if !ae.Temporary() || !ae.Retryable || !strings.Contains(string(ae.Details), `"lag":4`) {
+		t.Fatalf("unexpected APIError: %#v", ae)
 	}
 }

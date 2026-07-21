@@ -63,11 +63,18 @@ func New(baseURL string, opts ...Option) (*Client, error) {
 
 type APIError struct {
 	StatusCode int
+	Status     string
 	Code       string
 	Message    string
+	Retryable  bool
+	Details    json.RawMessage
+	Body       string
 }
 
 func (e *APIError) Error() string {
+	if e == nil {
+		return "junobroadcast: api error <nil>"
+	}
 	msg := strings.TrimSpace(e.Message)
 	code := strings.TrimSpace(e.Code)
 	switch {
@@ -81,6 +88,12 @@ func (e *APIError) Error() string {
 		}
 		return fmt.Sprintf("junobroadcast: http %d: %s", e.StatusCode, msg)
 	}
+}
+
+// Temporary reports whether the failed HTTP request can reasonably be
+// retried without changing it.
+func (e *APIError) Temporary() bool {
+	return e != nil && (e.Retryable || e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500)
 }
 
 type HealthResponse struct {
@@ -203,25 +216,36 @@ func (c *Client) doJSON(ctx context.Context, method, path string, in any, out an
 	defer resp.Body.Close()
 
 	const maxBody = 1 << 20
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	if readErr != nil {
+		return fmt.Errorf("junobroadcast: read response: %w", readErr)
+	}
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		var er struct {
 			Error struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
+				Code      string          `json:"code"`
+				Message   string          `json:"message"`
+				Retryable bool            `json:"retryable"`
+				Details   json.RawMessage `json:"details"`
 			} `json:"error"`
 		}
 		if json.Unmarshal(raw, &er) == nil && strings.TrimSpace(er.Error.Code) != "" {
 			return &APIError{
 				StatusCode: resp.StatusCode,
+				Status:     resp.Status,
 				Code:       strings.TrimSpace(er.Error.Code),
 				Message:    strings.TrimSpace(er.Error.Message),
+				Retryable:  er.Error.Retryable,
+				Details:    er.Error.Details,
+				Body:       string(raw),
 			}
 		}
 		return &APIError{
 			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
 			Message:    strings.TrimSpace(string(raw)),
+			Body:       string(raw),
 		}
 	}
 	if out == nil {

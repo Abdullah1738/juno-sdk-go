@@ -79,6 +79,9 @@ type rpcResponse struct {
 }
 
 func (c *Client) Call(ctx context.Context, method string, params any, out any) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if strings.TrimSpace(method) == "" {
 		return errors.New("junocashd: method is required")
 	}
@@ -131,11 +134,11 @@ func (c *Client) Call(ctx context.Context, method string, params any, out any) e
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		msg := strings.TrimSpace(string(body))
-		if msg == "" {
-			msg = resp.Status
+		return &HTTPError{
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			Body:       string(body),
 		}
-		return fmt.Errorf("junocashd: http %d: %s", resp.StatusCode, msg)
 	}
 
 	if err := json.Unmarshal(body, &rpcResp); err != nil {
