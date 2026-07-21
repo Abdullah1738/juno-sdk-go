@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.4.0 (2026-07-21)
 
 - Add authenticated juno-scan access, event epochs, immutable UFVK fingerprints, external deposit origin, birthday-aware wallet registration, typed historical backfill progress, bounded resume calls, address-filtered note queries, typed address balances, and scanner readiness/cache health fields.
 - Add typed verbose `junocashd` transaction lookup with optional raw hex and mined/mempool helpers.
