@@ -15,7 +15,10 @@ type TxOutput struct {
 }
 
 type OrchardSpendNote struct {
-	NoteID          string   `json:"note_id,omitempty"`
+	// NoteID is the stable selected source outpoint, encoded as txid:action_index.
+	// Plan validators require it so custody systems have an unambiguous
+	// reservation identity before signing.
+	NoteID          string   `json:"note_id"`
 	ActionNullifier string   `json:"action_nullifier"`
 	CMX             string   `json:"cmx"`
 	Position        uint32   `json:"position"`

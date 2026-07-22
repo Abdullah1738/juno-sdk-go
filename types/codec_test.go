@@ -27,7 +27,7 @@ func TestTxPlan_JSONRoundTrip(t *testing.T) {
 		FeeZat:        "1000",
 		Notes: []types.OrchardSpendNote{
 			{
-				NoteID:          "deadbeef:7",
+				NoteID:          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:7",
 				ActionNullifier: "00",
 				CMX:             "00",
 				Position:        7,
@@ -53,6 +53,20 @@ func TestTxPlan_JSONRoundTrip(t *testing.T) {
 
 	if !reflect.DeepEqual(in, out) {
 		t.Fatalf("round-trip mismatch:\n  in=%#v\n out=%#v", in, out)
+	}
+}
+
+func TestOrchardSpendNote_JSONAlwaysIncludesNoteID(t *testing.T) {
+	b, err := json.Marshal(types.OrchardSpendNote{})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := decoded["note_id"]; !ok {
+		t.Fatal("note_id was omitted")
 	}
 }
 
