@@ -18,7 +18,10 @@ type OrchardSpendNote struct {
 	// NoteID is the stable selected source outpoint, encoded as txid:action_index.
 	// Plan validators require it so custody systems have an unambiguous
 	// reservation identity before signing.
-	NoteID          string   `json:"note_id"`
+	NoteID string `json:"note_id"`
+	// ActionNullifier is the nullifier field from the Orchard action that
+	// created this note. It is note-decryption context, not the nullifier later
+	// derived when a new transaction spends the note.
 	ActionNullifier string   `json:"action_nullifier"`
 	CMX             string   `json:"cmx"`
 	Position        uint32   `json:"position"`

@@ -19,7 +19,7 @@ type DepositEvent struct {
 	Version          Version  `json:"version"`
 	WalletID         string   `json:"wallet_id"`
 	AccountID        string   `json:"account_id,omitempty"`
-	DiversifierIndex uint32   `json:"diversifier_index,omitempty"`
+	DiversifierIndex uint32   `json:"diversifier_index"`
 	TxID             string   `json:"txid"`
 	Height           int64    `json:"height"`
 	ActionIndex      uint32   `json:"action_index"`
