@@ -34,6 +34,16 @@ func TestClient_GetBlockchainInfo_Integration(t *testing.T) {
 	if info.Chain != "regtest" {
 		t.Fatalf("chain=%q want regtest", info.Chain)
 	}
+
+	var networkInfo struct {
+		SubVersion string `json:"subversion"`
+	}
+	if err := cli.Call(ctx, "getnetworkinfo", nil, &networkInfo); err != nil {
+		t.Fatalf("getnetworkinfo: %v", err)
+	}
+	if networkInfo.SubVersion != "/Junocash:0.9.13/" {
+		t.Fatalf("subversion=%q want /Junocash:0.9.13/", networkInfo.SubVersion)
+	}
 }
 
 func TestClient_GetBlockVerbose_Integration(t *testing.T) {
