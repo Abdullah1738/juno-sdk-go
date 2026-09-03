@@ -1,7 +1,7 @@
 FROM ubuntu:24.04@sha256:1e0a86e57d247923571b75e0aaf48a1449cf8c543d51fb3e07a4a7d7bfa79316
 
 ARG JUNOCASH_VERSION=0.9.13
-ARG JUNOCASH_LINUX64_SHA256=38cd45b8766da65cb14a14337279ae9fc06ba37227f03c1eaf2cfbfbc415f06b
+ARG JUNOCASH_LINUX64_SHA256=7e83b8c888344f33129ece2160d8b6434bc91ffb9cd992665aadd2c02c904f11
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
